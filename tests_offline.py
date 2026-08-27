@@ -119,4 +119,5 @@ with TemporaryDirectory() as tmp:
     check("offset divisible by 4096", offset % 4096, 0)
 
 print(f"\n{ok} passed, {fail} failed")
-raise SystemExit(1 if fail else 0)
+if __name__ == "__main__":
+    raise SystemExit(1 if fail else 0)
