@@ -52,8 +52,20 @@ MESSAGES = {111: [message(9, "alpha"), message(8, "beta"), message(7, "gamma")],
 
 
 class StubClient:
+    """An already-signed-in client; the login flow itself lives in tests_auth.py."""
+
     def __init__(self):
         self.downloads = 0
+        self.connected = True
+
+    def is_connected(self):
+        return self.connected
+
+    async def connect(self):
+        self.connected = True
+
+    async def is_user_authorized(self):
+        return True
 
     async def get_me(self):
         return SimpleNamespace(first_name="Dana", last_name="", username="dana", id=42)
@@ -106,7 +118,17 @@ async def main():
             check("index served", page.status, 200)
             check("index is html", "text/html" in page.headers["content-type"], True)
             body = await page.text()
-            check("no external asset refs", ("http://" in body or "https://" in body), False)
+            # Hyperlinks the user clicks are fine; loading assets off-box is not,
+            # since the page must work with no internet and leak no requests.
+            import re as _re
+            loaders = _re.findall(
+                r'(?:<script[^>]+src|<link[^>]+href|<img[^>]+src)\s*=\s*["\']https?:'
+                r'|@import\s+["\']?https?:|url\(\s*["\']?https?:', body, _re.I)
+            check("no external assets loaded", loaders, [])
+            check("only outbound link is telegram's", 
+                  sorted(set(_re.findall(r'https?://[a-z0-9.\-]+', body, _re.I))),
+                  ["https://my.telegram.org"])
+            check("no third-party script tags", body.count("<script"), 1)
 
             print("\nscanning a chat")
             scan = await (await http.post("/api/scan", json={"chat_id": 111})).json()
