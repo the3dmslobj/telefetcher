@@ -59,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     chats.add_argument("filter", nargs="?", help="only show titles containing this text")
     chats.add_argument("--all", action="store_true", help="include private chats and bots")
 
+    ui = sub.add_parser("ui", help="open the local web interface")
+    ui.add_argument("--port", type=int, default=8420)
+    ui.add_argument("--host", default="127.0.0.1", help="bind address (loopback only)")
+    ui.add_argument("--root", type=Path, help="downloads folder (default: ./downloads)")
+    ui.add_argument("--no-open", action="store_true", help="don't launch a browser")
+
     get = sub.add_parser("get", help="download videos from a chat")
     get.add_argument(
         "chat",
@@ -133,6 +139,14 @@ async def cmd_chats(client, args) -> int:
     for chat_id, kind, access, name in rows:
         print(f"{chat_id:>{width}}  {kind:<7} {access:<7}  {name}")
     print(f"\n{len(rows)} chats")
+    return 0
+
+
+async def cmd_ui(client, args) -> int:
+    from .web import serve
+
+    root = (args.root or Path.cwd() / "downloads").expanduser()
+    await serve(client, root, args.host, args.port, not args.no_open)
     return 0
 
 
@@ -223,6 +237,7 @@ COMMANDS = {
     "logout": None,
     "whoami": cmd_whoami,
     "chats": cmd_chats,
+    "ui": cmd_ui,
     "get": cmd_get,
 }
 
@@ -270,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except KeyboardInterrupt:
         print("\ninterrupted — partial files are kept, re-run to resume")
+        return 130
+    except asyncio.CancelledError:
         return 130
 
 
