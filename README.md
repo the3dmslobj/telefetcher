@@ -137,4 +137,9 @@ re-checking the network.
 .venv/bin/python tests_auth.py        # login flow, 2FA, sign-out, request guard
 ```
 
-All four run entirely offline — no login, no network. 166 checks in total.
+All four run entirely offline — no login, no network. 175 checks in total.
+
+### License
+
+MIT — see [LICENSE](LICENSE). It covers this code only, not anything you
+download with it.
