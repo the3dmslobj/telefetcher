@@ -82,16 +82,35 @@ td.name { word-break:break-word; }
   background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--err);
   padding:9px 14px; border-radius:6px; box-shadow:0 4px 18px rgba(0,0,0,.18); max-width:70vw;
 }
+#login { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center;
+  justify-content:center; z-index:20; padding:20px; }
+#login .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:26px 28px; width:100%; max-width:400px; box-shadow:0 10px 40px rgba(0,0,0,.12); }
+#login h2 { margin:0 0 4px; font-size:17px; }
+#login p.lede { margin:0 0 18px; color:var(--dim); font-size:13px; }
+#login label { display:block; font-size:12.5px; color:var(--dim); margin:12px 0 4px; }
+#login input { width:100%; padding:9px 11px; font-size:15px; }
+#login .actions { display:flex; gap:8px; align-items:center; margin-top:18px; }
+#login .actions button.primary { flex:1; padding:9px; }
+#login .err { color:var(--err); font-size:12.5px; margin-top:12px; min-height:1em; }
+#login a { color:var(--accent); }
+#login .back { background:none; border:none; color:var(--dim); padding:4px; font-size:12.5px;
+  text-decoration:underline; cursor:pointer; }
+#login .steps { display:flex; gap:5px; margin-bottom:16px; }
+#login .steps i { height:3px; flex:1; background:var(--line); border-radius:2px; }
+#login .steps i.on { background:var(--accent); }
 .spin { display:inline-block; width:11px; height:11px; border:2px solid var(--line);
   border-top-color:var(--accent); border-radius:50%; animation:s .7s linear infinite; }
 @keyframes s { to { transform:rotate(360deg); } }
 </style>
 </head>
 <body>
+<div id="login" hidden><div class="card" id="loginCard"></div></div>
 <header>
   <h1>telefetcher</h1>
   <span id="scanning" hidden><span class="spin"></span></span>
   <div class="who" id="who">connecting…</div>
+  <button id="signout" hidden style="padding:4px 10px;font-size:12.5px">Sign out</button>
 </header>
 <main>
   <aside>
@@ -337,17 +356,114 @@ $('#grab').onclick = async () => {
   toast(`queued ${n} file(s)`);
 };
 
-(async () => {
-  try {
-    const me = await api('/api/me');
-    $('#who').textContent = `${me.name}${me.username ? ' @' + me.username : ''} · ${me.root}`;
-  } catch { $('#who').textContent = 'not signed in — run tf login'; }
+// ---- login ----
+const STEPS = ['credentials', 'phone', 'code', 'password'];
+let busy = false;
+
+async function authPost(path, body) {
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(text || r.statusText);
+  return JSON.parse(text);
+}
+
+function renderLogin(step, err = '') {
+  const card = $('#loginCard');
+  const idx = STEPS.indexOf(step);
+  const dots = el('div', { class: 'steps' }, STEPS.map((_, i) =>
+    el('i', { class: i <= idx ? 'on' : '' })));
+  const error = el('div', { class: 'err' }, err);
+
+  const submit = async (fn) => {
+    if (busy) return;
+    busy = true;
+    error.textContent = '';
+    try {
+      const res = await fn();
+      busy = false;
+      if (res.step === 'ready') return startApp();
+      renderLogin(res.step);
+    } catch (e) {
+      busy = false;
+      renderLogin(step, e.message);
+    }
+  };
+
+  const form = (title, lede, fields, onSubmit, extra) => {
+    const inputs = fields.map(f => {
+      const input = el('input', {
+        type: f.type || 'text', id: 'li_' + f.key,
+        placeholder: f.placeholder || '', autocomplete: f.autocomplete || 'off',
+      });
+      return { field: f, input, node: el('div', {}, el('label', {}, f.label), input) };
+    });
+    const go = () => onSubmit(Object.fromEntries(inputs.map(i => [i.field.key, i.input.value])));
+    inputs.forEach(i => i.input.addEventListener('keydown', e => { if (e.key === 'Enter') go(); }));
+    card.replaceChildren(
+      dots, el('h2', {}, title), el('p', { class: 'lede' }, lede),
+      ...inputs.map(i => i.node), error,
+      el('div', { class: 'actions' },
+        el('button', { class: 'primary', onclick: go }, 'Continue'), extra || null));
+    setTimeout(() => inputs[0]?.input.focus(), 30);
+  };
+
+  if (step === 'credentials') {
+    const card2 = el('span', {}, 'Get these from ',
+      el('a', { href: 'https://my.telegram.org', target: '_blank' }, 'my.telegram.org'),
+      ' → API development tools. They identify the app, not your account.');
+    form('Connect your Telegram app', '', [
+      { key: 'api_id', label: 'api_id', placeholder: '1234567' },
+      { key: 'api_hash', label: 'api_hash', placeholder: '0123456789abcdef…' },
+    ], v => submit(() => authPost('/api/auth/credentials', v)));
+    card.querySelector('p.lede').replaceChildren(card2);
+  } else if (step === 'phone') {
+    form('Sign in', 'Telegram will send a code to this number.', [
+      { key: 'phone', label: 'Phone number', placeholder: '+15551234567', autocomplete: 'tel' },
+    ], v => submit(() => authPost('/api/auth/phone', v)));
+  } else if (step === 'code') {
+    form('Enter the code', 'Check your other Telegram apps for the login code.', [
+      { key: 'code', label: 'Login code', placeholder: '12345' },
+    ], v => submit(() => authPost('/api/auth/code', v)),
+      el('button', { class: 'back', onclick: () => renderLogin('phone') }, 'Use another number'));
+  } else if (step === 'password') {
+    form('Two-step verification', 'This account has a password set.', [
+      { key: 'password', label: 'Password', type: 'password', autocomplete: 'current-password' },
+    ], v => submit(() => authPost('/api/auth/password', v)));
+  }
+  $('#login').hidden = false;
+}
+
+let ticker = null;
+async function startApp() {
+  const s = await api('/api/auth/status');
+  if (s.step !== 'ready') return renderLogin(s.step);
+  $('#login').hidden = true;
+  $('#signout').hidden = false;
+  $('#who').textContent =
+    `${s.me.name}${s.me.username ? ' @' + s.me.username : ''} · ${s.root}`;
   await loadChats();
-  setInterval(async () => {
+  if (ticker) clearInterval(ticker);
+  ticker = setInterval(async () => {
     const running = await refreshJobs().catch(() => 0);
     if (running === 0 && !$('#tab-files').hidden) loadFiles();
   }, 900);
-})();
+}
+
+$('#signout').onclick = async () => {
+  if (!confirm('Sign out and delete the saved session on this machine?')) return;
+  if (ticker) { clearInterval(ticker); ticker = null; }
+  const res = await post('/api/auth/logout');
+  chats = []; items = []; picked = new Set(); current = null;
+  $('#chats').replaceChildren();
+  $('#videos').replaceChildren(el('div', { class: 'empty' }, 'Pick a chat on the left.'));
+  $('#signout').hidden = true;
+  $('#who').textContent = 'signed out';
+  renderLogin(res.step);
+};
+
+startApp();
 </script>
 </body>
 </html>
