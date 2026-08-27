@@ -42,6 +42,29 @@ A private channel has no `@username`, so the friendliest handle is its **title**
 same text you see in the app. Ids and `t.me/c/…` links work too, and `./tf chats` prints
 both.
 
+## Local interface
+
+If you'd rather click than type:
+
+```bash
+./tf ui              # http://127.0.0.1:8420, opens your browser
+./tf ui --port 9000 --root ~/Movies/telegram --no-open
+```
+
+- **Chats** sidebar — everything you've joined, searchable, with `private` and
+  `protected` badges.
+- **Videos** — scan a chat, filter by size/caption/kind, tick what you want, download.
+  Files you already have are marked `✓ have` so you can't queue them twice by accident.
+- **Downloads** — live per-file progress, with cancel. Cancelling keeps the partial
+  files, so re-queueing resumes.
+- **Files** — everything on disk, with reveal-in-Finder and delete.
+
+It drives the same `collect` / `run` code as the CLI, so the two can't drift apart, and
+both share the ledger — grab something in the browser and `./tf get` knows you have it.
+
+The server binds to `127.0.0.1` only, and every file operation is checked against the
+downloads root, so a stray request can't reach outside it.
+
 ### Picking what to grab
 
 ```bash
@@ -90,6 +113,7 @@ re-checking the network.
 ```bash
 .venv/bin/python tests_offline.py     # naming, filters, parsers, state ledger
 .venv/bin/python tests_download.py    # download / resume / retry against a stub client
+.venv/bin/python tests_web.py         # web api, download jobs, path guard
 ```
 
-Both run entirely offline — no login, no network.
+All three run entirely offline — no login, no network.
