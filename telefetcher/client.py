@@ -30,6 +30,12 @@ def _lock_down(path: Path) -> None:
         pass
 
 
+def secure_session(session: str) -> None:
+    """Call after connecting — Telethon creates the file lazily, so the chmod in
+    make_client runs too early to catch a brand new session."""
+    _lock_down(session_path(session))
+
+
 def make_client(config: Config, session: str) -> TelegramClient:
     path = session_path(session)
     path.parent.mkdir(parents=True, exist_ok=True)

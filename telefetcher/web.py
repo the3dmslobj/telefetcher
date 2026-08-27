@@ -13,16 +13,35 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import web
+from telethon.errors import (
+    ApiIdInvalidError,
+    FloodWaitError,
+    PasswordHashInvalidError,
+    PhoneCodeExpiredError,
+    PhoneCodeInvalidError,
+    PhoneNumberBannedError,
+    PhoneNumberInvalidError,
+    SessionPasswordNeededError,
+)
 from telethon.tl.types import Channel, Chat, User
 
-from .client import ChatNotFound, resolve_chat
+from .client import ChatNotFound, make_client, secure_session
+from .config import ConfigError, load_config, save_config, session_path
 from .downloader import CallbackReporter, Options, collect, run
 from .media import GIF, VIDEO, VIDEO_NOTE, VideoItem
 from .state import State
 
 STATIC = Path(__file__).parent / "static"
+
+# Steps the browser walks through before the app is usable.
+STEP_CREDENTIALS = "credentials"   # no api_id/api_hash on this machine yet
+STEP_PHONE = "phone"               # have credentials, need a number
+STEP_CODE = "code"                 # code sent, waiting for it
+STEP_PASSWORD = "password"         # 2FA is on
+STEP_READY = "ready"
 
 
 @dataclass
@@ -73,12 +92,159 @@ class Job:
 
 
 class Server:
-    def __init__(self, client, root: Path):
+    def __init__(self, client, root: Path, session_name: str = "default",
+                 client_factory=None):
         self.client = client
         self.root = root
+        self.session_name = session_name
+        # Injectable so the login flow can be tested without a real connection.
+        self.client_factory = client_factory or (
+            lambda: make_client(load_config(), session_name)
+        )
         self.jobs: dict[str, Job] = {}
         self.entities: dict[int, object] = {}
         self.scans: dict[int, list[VideoItem]] = {}
+        self.phone: str | None = None
+        self.awaiting_password = False
+
+    # ---- auth ----------------------------------------------------------
+
+    async def ensure_client(self):
+        """Build and connect the client once credentials exist on disk."""
+        if self.client is None:
+            self.client = self.client_factory()
+        if not self.client.is_connected():
+            await self.client.connect()
+        secure_session(self.session_name)
+        return self.client
+
+    async def current_step(self) -> str:
+        try:
+            await self.ensure_client()
+        except ConfigError:
+            return STEP_CREDENTIALS
+        if await self.client.is_user_authorized():
+            return STEP_READY
+        if self.awaiting_password:
+            return STEP_PASSWORD
+        return STEP_CODE if self.phone else STEP_PHONE
+
+    async def authorized(self) -> bool:
+        return await self.current_step() == STEP_READY
+
+    async def auth_status(self, _request):
+        step = await self.current_step()
+        payload = {"step": step}
+        if step == STEP_READY:
+            user = await self.client.get_me()
+            payload["me"] = {
+                "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+                "username": user.username,
+                "id": user.id,
+            }
+        payload["root"] = str(self.root)
+        return web.json_response(payload)
+
+    async def auth_credentials(self, request):
+        body = await request.json()
+        try:
+            api_id = int(str(body.get("api_id", "")).strip())
+        except ValueError:
+            raise web.HTTPBadRequest(text="api_id must be a number") from None
+        api_hash = str(body.get("api_hash", "")).strip()
+        if not api_hash:
+            raise web.HTTPBadRequest(text="api_hash is required")
+        save_config(api_id, api_hash)
+        self.client = None  # rebuild against the new credentials
+        return web.json_response({"step": await self.current_step()})
+
+    async def auth_phone(self, request):
+        body = await request.json()
+        phone = str(body.get("phone", "")).strip()
+        if not phone:
+            raise web.HTTPBadRequest(text="phone number is required")
+        client = await self.ensure_client()
+        try:
+            await client.send_code_request(phone)
+        except PhoneNumberInvalidError:
+            raise web.HTTPBadRequest(text="that phone number isn't valid") from None
+        except PhoneNumberBannedError:
+            raise web.HTTPBadRequest(text="that number is banned from Telegram") from None
+        except ApiIdInvalidError:
+            raise web.HTTPBadRequest(
+                text="api_id/api_hash rejected — check them at my.telegram.org"
+            ) from None
+        except FloodWaitError as exc:
+            raise web.HTTPTooManyRequests(
+                text=f"too many attempts, wait {exc.seconds}s"
+            ) from None
+        self.phone = phone
+        self.awaiting_password = False
+        return web.json_response({"step": STEP_CODE})
+
+    async def auth_code(self, request):
+        body = await request.json()
+        code = str(body.get("code", "")).strip()
+        if not self.phone:
+            raise web.HTTPBadRequest(text="ask for a code first")
+        if not code:
+            raise web.HTTPBadRequest(text="code is required")
+        client = await self.ensure_client()
+        try:
+            await client.sign_in(phone=self.phone, code=code)
+        except SessionPasswordNeededError:
+            self.awaiting_password = True
+            return web.json_response({"step": STEP_PASSWORD})
+        except PhoneCodeInvalidError:
+            raise web.HTTPBadRequest(text="that code isn't right") from None
+        except PhoneCodeExpiredError:
+            self.phone = None
+            raise web.HTTPBadRequest(text="that code expired — request a new one") from None
+        except FloodWaitError as exc:
+            raise web.HTTPTooManyRequests(
+                text=f"too many attempts, wait {exc.seconds}s"
+            ) from None
+        return web.json_response({"step": await self.finish_login()})
+
+    async def auth_password(self, request):
+        body = await request.json()
+        password = body.get("password") or ""
+        if not password:
+            raise web.HTTPBadRequest(text="password is required")
+        client = await self.ensure_client()
+        try:
+            await client.sign_in(password=password)
+        except PasswordHashInvalidError:
+            raise web.HTTPBadRequest(text="that password isn't right") from None
+        except FloodWaitError as exc:
+            raise web.HTTPTooManyRequests(
+                text=f"too many attempts, wait {exc.seconds}s"
+            ) from None
+        return web.json_response({"step": await self.finish_login()})
+
+    async def finish_login(self) -> str:
+        secure_session(self.session_name)
+        self.phone = None
+        self.awaiting_password = False
+        self.entities.clear()
+        self.scans.clear()
+        return await self.current_step()
+
+    async def auth_logout(self, _request):
+        if self.client is not None:
+            if not self.client.is_connected():
+                await self.client.connect()
+            if await self.client.is_user_authorized():
+                await self.client.log_out()
+            await self.client.disconnect()
+        session_path(self.session_name).unlink(missing_ok=True)
+        self.client = None
+        self.entities.clear()
+        self.scans.clear()
+        self.jobs.clear()
+        self.phone = None
+        self.awaiting_password = False
+        return web.json_response({"step": await self.current_step()})
 
     # ---- helpers -------------------------------------------------------
 
@@ -335,12 +501,71 @@ class Server:
         return web.json_response({"ok": True})
 
 
-def build_app(client, root: Path) -> web.Application:
-    server = Server(client, root)
-    app = web.Application()
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+OPEN_PATHS = ("/api/auth/",)  # reachable before sign-in
+
+
+def hostname_of(value: str, with_scheme: bool = False) -> str:
+    """Hostname from a Host header or an Origin, port and scheme stripped."""
+    try:
+        parts = urlsplit(value if with_scheme else "//" + value)
+        return (parts.hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def make_guard(host: str, _port: int):
+    """Keep other origins out of an API that holds a live Telegram session.
+
+    A browser will happily send a cross-site request to localhost. Checking the
+    Host *name* blocks DNS rebinding (an attacker's domain resolving to
+    127.0.0.1 still sends its own name), and checking Origin blocks a page on
+    another site from POSTing here. Ports are deliberately ignored — they say
+    nothing about who is calling.
+    """
+    allowed = ALLOWED_HOSTS | {host.lower()}
+
+    @web.middleware
+    async def guard(request, handler):
+        if hostname_of(request.headers.get("Host") or "") not in allowed:
+            raise web.HTTPForbidden(text="bad Host header")
+        origin = request.headers.get("Origin")
+        if origin:
+            if urlsplit(origin).scheme not in ("http", "https") or (
+                hostname_of(origin, with_scheme=True) not in allowed
+            ):
+                raise web.HTTPForbidden(text="cross-origin requests are not allowed")
+        return await handler(request)
+
+    return guard
+
+
+@web.middleware
+async def require_login(request, handler):
+    """Everything but the auth handshake and the page itself needs a session."""
+    path = request.path
+    if path.startswith("/api/") and not path.startswith(OPEN_PATHS):
+        server = request.app["server"]
+        if not await server.authorized():
+            raise web.HTTPUnauthorized(text="not signed in")
+    return await handler(request)
+
+
+def build_app(client, root: Path, session_name: str = "default",
+              host: str = "127.0.0.1", port: int = 8420,
+              client_factory=None) -> web.Application:
+    server = Server(client, root, session_name, client_factory)
+    app = web.Application(middlewares=[make_guard(host, port), require_login])
+    app["server"] = server
     app.add_routes(
         [
             web.get("/", server.index),
+            web.get("/api/auth/status", server.auth_status),
+            web.post("/api/auth/credentials", server.auth_credentials),
+            web.post("/api/auth/phone", server.auth_phone),
+            web.post("/api/auth/code", server.auth_code),
+            web.post("/api/auth/password", server.auth_password),
+            web.post("/api/auth/logout", server.auth_logout),
             web.get("/api/me", server.me),
             web.get("/api/chats", server.chats),
             web.post("/api/scan", server.scan),
@@ -357,17 +582,20 @@ def build_app(client, root: Path) -> web.Application:
     return app
 
 
-async def serve(client, root: Path, host: str, port: int, open_browser: bool) -> None:
+async def serve(client, root: Path, host: str, port: int, open_browser: bool,
+                session_name: str = "default") -> None:
     root.mkdir(parents=True, exist_ok=True)
-    runner = web.AppRunner(build_app(client, root), access_log=None)
+    app = build_app(client, root, session_name, host, port)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
 
     url = f"http://{host}:{port}"
-    print(f"telefetcher ui on {url}")
-    print(f"downloads -> {root}")
-    print("ctrl-c to stop")
+    # flush so the banner shows even when stdout is piped to a file
+    print(f"telefetcher ui on {url}", flush=True)
+    print(f"downloads -> {root}", flush=True)
+    print("ctrl-c to stop", flush=True)
     if open_browser:
         import webbrowser
 
