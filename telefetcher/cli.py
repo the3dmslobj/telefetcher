@@ -12,7 +12,7 @@ from pathlib import Path
 from telethon.tl.types import Channel, Chat, User
 
 from . import __version__
-from .client import ChatNotFound, interactive_login, make_client, resolve_chat
+from .client import ChatNotFound, interactive_login, make_client, resolve_chat, secure_session
 from .config import DEFAULT_SESSION, ConfigError, load_config, save_config, session_path
 from .downloader import Options, collect, run
 from .media import GIF, VIDEO, VIDEO_NOTE, human_duration, human_size
@@ -146,7 +146,7 @@ async def cmd_ui(client, args) -> int:
     from .web import serve
 
     root = (args.root or Path.cwd() / "downloads").expanduser()
-    await serve(client, root, args.host, args.port, not args.no_open)
+    await serve(client, root, args.host, args.port, not args.no_open, args.session)
     return 0
 
 
@@ -255,9 +255,23 @@ async def _run(args) -> int:
         print(f"signed out, removed {path}")
         return 0
 
+    if args.command == "ui":
+        try:
+            client = make_client(load_config(), args.session)
+            await client.connect()
+            secure_session(args.session)
+        except ConfigError:
+            client = None  # the browser will collect api_id/api_hash and sign in
+        try:
+            return await cmd_ui(client, args)
+        finally:
+            if client is not None and client.is_connected():
+                await client.disconnect()
+
     config = load_config()
     client = make_client(config, args.session)
     await client.connect()
+    secure_session(args.session)
     try:
         if args.command != "login" and not await client.is_user_authorized():
             print("not signed in — run `tf login` first", file=sys.stderr)
