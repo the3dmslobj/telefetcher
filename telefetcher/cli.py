@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -296,6 +297,20 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_run(args))
     except ConfigError as exc:
         print(exc, file=sys.stderr)
+        return 2
+    except sqlite3.OperationalError as exc:
+        # Telethon keeps the session in SQLite, which takes one writer at a
+        # time. A running `tf ui` holds it, so a second command would otherwise
+        # die on an opaque "database is locked" traceback.
+        if "locked" not in str(exc):
+            raise
+        print(
+            f"session {args.session!r} is already in use by another telefetcher "
+            "process — is `tf ui` still running?\n"
+            "stop it (ctrl-c in that terminal), or use a separate login with "
+            "`tf --session other ...`",
+            file=sys.stderr,
+        )
         return 2
     except KeyboardInterrupt:
         print("\ninterrupted — partial files are kept, re-run to resume")
