@@ -106,7 +106,52 @@ async def collect(client, chat, opts: Options) -> list[VideoItem]:
     return items[: opts.limit] if opts.limit else items
 
 
-async def _stream(client, item: VideoItem, part: Path, bar: tqdm) -> None:
+class TqdmReporter:
+    """Per-file progress on a terminal bar."""
+
+    def __init__(self, item: VideoItem, position: int = 0):
+        label = item.filename if len(item.filename) <= 42 else item.filename[:39] + "..."
+        self.bar = tqdm(
+            total=item.size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            desc=label,
+            position=position,
+            leave=False,
+            dynamic_ncols=True,
+        )
+
+    def update(self, count: int) -> None:
+        self.bar.update(count)
+
+    def note(self, text: str) -> None:
+        self.bar.write(text)
+
+    def close(self) -> None:
+        self.bar.close()
+
+
+class CallbackReporter:
+    """Per-file progress handed to a caller — used by the web UI's job records."""
+
+    def __init__(self, item: VideoItem, on_progress, on_note=None):
+        self.item, self.done = item, 0
+        self.on_progress, self.on_note = on_progress, on_note
+
+    def update(self, count: int) -> None:
+        self.done += count
+        self.on_progress(self.item, self.done, self.item.size)
+
+    def note(self, text: str) -> None:
+        if self.on_note:
+            self.on_note(text)
+
+    def close(self) -> None:
+        pass
+
+
+async def _stream(client, item: VideoItem, part: Path, bar) -> None:
     """Append to the .part file from wherever it left off."""
     offset = part.stat().st_size if part.exists() else 0
     offset -= offset % ALIGN
@@ -122,7 +167,13 @@ async def _stream(client, item: VideoItem, part: Path, bar: tqdm) -> None:
 
 
 async def download_one(
-    client, chat_id: int, item: VideoItem, opts: Options, state: State, position: int
+    client,
+    chat_id: int,
+    item: VideoItem,
+    opts: Options,
+    state: State,
+    position: int,
+    make_reporter=None,
 ) -> tuple[str, int]:
     """Returns (outcome, bytes_written) where outcome is downloaded/skipped/failed."""
     dest = opts.out_dir / item.filename
@@ -138,25 +189,17 @@ async def download_one(
     if opts.dry_run:
         return "downloaded", item.size
 
+    make_reporter = make_reporter or TqdmReporter
     label = item.filename if len(item.filename) <= 42 else item.filename[:39] + "..."
     for attempt in range(1, MAX_RETRIES + 1):
-        bar = tqdm(
-            total=item.size,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=label,
-            position=position,
-            leave=False,
-            dynamic_ncols=True,
-        )
+        bar = make_reporter(item, position)
         try:
             await _stream(client, item, part, bar)
             part.replace(dest)
             state.record(chat_id, item.msg_id, dest, item.size)
             return "downloaded", item.size
         except FloodWaitError as exc:
-            bar.write(f"rate limited by Telegram, waiting {exc.seconds}s — {label}")
+            bar.note(f"rate limited by Telegram, waiting {exc.seconds}s — {label}")
             await asyncio.sleep(exc.seconds + 1)
         except FileReferenceExpiredError:
             # File references go stale after a while; re-fetch the message.
@@ -167,7 +210,7 @@ async def download_one(
         except (OSError, ConnectionError) as exc:
             if attempt == MAX_RETRIES:
                 raise
-            bar.write(f"retry {attempt}/{MAX_RETRIES} after {exc!r} — {label}")
+            bar.note(f"retry {attempt}/{MAX_RETRIES} after {exc!r} — {label}")
             await asyncio.sleep(min(2**attempt, 30))
         finally:
             bar.close()
@@ -175,17 +218,38 @@ async def download_one(
     return "failed", 0
 
 
-async def run(client, chat, items: list[VideoItem], opts: Options, state: State) -> Summary:
+class _NullBar:
+    def update(self, count: int) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+async def run(
+    client,
+    chat,
+    items: list[VideoItem],
+    opts: Options,
+    state: State,
+    make_reporter=None,
+    quiet: bool = False,
+    on_done=None,
+) -> Summary:
     summary = Summary()
     opts.out_dir.mkdir(parents=True, exist_ok=True)
     chat_id = chat.id
 
-    overall = tqdm(
-        total=len(items),
-        unit="file",
-        desc="videos",
-        position=opts.workers,
-        dynamic_ncols=True,
+    overall = (
+        _NullBar()
+        if quiet
+        else tqdm(
+            total=len(items),
+            unit="file",
+            desc="videos",
+            position=opts.workers,
+            dynamic_ncols=True,
+        )
     )
     slots: asyncio.Queue[int] = asyncio.Queue()
     for slot in range(opts.workers):
@@ -194,7 +258,9 @@ async def run(client, chat, items: list[VideoItem], opts: Options, state: State)
     async def worker(item: VideoItem) -> None:
         slot = await slots.get()
         try:
-            outcome, written = await download_one(client, chat_id, item, opts, state, slot)
+            outcome, written = await download_one(
+                client, chat_id, item, opts, state, slot, make_reporter
+            )
             if outcome == "downloaded":
                 summary.downloaded += 1
                 summary.bytes_written += written
@@ -208,6 +274,8 @@ async def run(client, chat, items: list[VideoItem], opts: Options, state: State)
         finally:
             slots.put_nowait(slot)
             overall.update(1)
+            if on_done:
+                on_done(item)
 
     pending: set[asyncio.Task] = set()
     for item in items:
@@ -217,6 +285,8 @@ async def run(client, chat, items: list[VideoItem], opts: Options, state: State)
     if pending:
         await asyncio.wait(pending)
     overall.close()
+    if quiet:
+        return summary
 
     print(
         f"\ndone — {summary.downloaded} downloaded "
