@@ -373,6 +373,11 @@ async function authPost(path, body) {
 }
 
 function renderLogin(step, err = '') {
+  // Only the four steps below have a form. Anything else — 'ready', or a value
+  // a newer server grew — would fall through every branch and leave the
+  // full-screen overlay covering the app with an empty card, locking the page.
+  if (step === 'ready') return startApp();
+  if (!STEPS.includes(step)) step = STEPS[0];
   const card = $('#loginCard');
   const idx = STEPS.indexOf(step);
   const dots = el('div', { class: 'steps' }, STEPS.map((_, i) =>
