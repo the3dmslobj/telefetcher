@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from telethon.errors import FloodWaitError
 from telethon.tl.types import Document, DocumentAttributeVideo
 
-from telefetcher.downloader import ALIGN, Options, download_one, run
+from telefetcher.downloader import ALIGN, CallbackReporter, Options, download_one, run
 from telefetcher.media import build_item
 from telefetcher.state import State
 
@@ -191,6 +191,34 @@ async def main():
         summary2 = await run(c, Chat(), items, new_opts(out, workers=3), st)
         check("re-run skips all", summary2.skipped, 7)
         check("re-run downloads none", summary2.downloaded, 0)
+        st.close()
+
+    print("\ncallback reporting (what the web UI consumes)")
+    with TemporaryDirectory() as tmp:
+        out = Path(tmp) / "chan"
+        st = State(Path(tmp) / "s.db")
+        items = [build_item(Msg(i, SIZE, f"w{i}"), "video") for i in range(40, 43)]
+        seen, finished = [], []
+
+        def make_reporter(item, position):
+            return CallbackReporter(item, lambda it, done, total: seen.append((it.msg_id, done, total)))
+
+        class Chat:
+            id = -1002
+
+        c = StubClient()
+        summary = await run(c, Chat(), items, new_opts(out, workers=2), st,
+                            make_reporter=make_reporter, quiet=True,
+                            on_done=lambda it: finished.append(it.msg_id))
+        check("quiet run still downloads", summary.downloaded, 3)
+        check("progress reported", len(seen) > 0, True)
+        check("progress covers every file", {m for m, _, _ in seen}, {40, 41, 42})
+        check("totals are the file size", {t for _, _, t in seen}, {SIZE})
+        check("progress is monotonic per file",
+              all(sorted(d for m, d, _ in seen if m == 40) == [d for m, d, _ in seen if m == 40]
+                  for _ in [0]), True)
+        check("final progress reaches the total", max(d for m, d, _ in seen if m == 40), SIZE)
+        check("on_done fired per file", sorted(finished), [40, 41, 42])
         st.close()
 
     print("\ndry run touches nothing")
