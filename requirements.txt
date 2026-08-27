@@ -1,0 +1,4 @@
+telethon>=1.36
+tqdm>=4.66
+python-dotenv>=1.0
+cryptg>=0.4          # optional but ~3x faster: native AES for MTProto
