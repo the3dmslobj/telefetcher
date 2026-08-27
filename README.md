@@ -44,12 +44,18 @@ both.
 
 ## Local interface
 
-If you'd rather click than type:
+If you'd rather click than type, the browser can do everything including signing in:
 
 ```bash
 ./tf ui              # http://127.0.0.1:8420, opens your browser
 ./tf ui --port 9000 --root ~/Movies/telegram --no-open
 ```
+
+On a machine that has never been set up, `tf ui` starts anyway and walks you through
+it — api_id/api_hash, phone number, login code, and your two-step password if you have
+one. There's no need to run `tf login` first; either front end can sign you in and both
+share the same session. **Sign out** in the header revokes the session and deletes it
+from disk.
 
 - **Chats** sidebar — everything you've joined, searchable, with `private` and
   `protected` badges.
@@ -62,8 +68,18 @@ If you'd rather click than type:
 It drives the same `collect` / `run` code as the CLI, so the two can't drift apart, and
 both share the ledger — grab something in the browser and `./tf get` knows you have it.
 
-The server binds to `127.0.0.1` only, and every file operation is checked against the
-downloads root, so a stray request can't reach outside it.
+### Why it's safe to run
+
+The interface holds a live Telegram session, so it is defended like one:
+
+- Binds to `127.0.0.1` only — verified with `lsof`; the LAN address refuses connections.
+- Rejects any request whose `Host` isn't a loopback name, which is what stops DNS
+  rebinding (an attacker's domain pointed at 127.0.0.1 still sends its own name).
+- Rejects any cross-site `Origin`, so a page you have open elsewhere can't drive it.
+- Every API route except the login handshake returns 401 until you're signed in.
+- File delete/reveal is checked against the downloads root, so `../..` goes nowhere.
+- Your `api_hash` is never sent back to the browser, and `config.json` plus the session
+  file are both `chmod 600`.
 
 ### Picking what to grab
 
@@ -114,6 +130,7 @@ re-checking the network.
 .venv/bin/python tests_offline.py     # naming, filters, parsers, state ledger
 .venv/bin/python tests_download.py    # download / resume / retry against a stub client
 .venv/bin/python tests_web.py         # web api, download jobs, path guard
+.venv/bin/python tests_auth.py        # login flow, 2FA, sign-out, request guard
 ```
 
-All three run entirely offline — no login, no network.
+All four run entirely offline — no login, no network. 166 checks in total.
