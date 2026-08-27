@@ -84,6 +84,9 @@ td.name { word-break:break-word; }
 }
 #login { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center;
   justify-content:center; z-index:20; padding:20px; }
+/* The id selector above outranks the browser's [hidden] { display:none }, so
+   without this the overlay stays on screen after sign-in and covers the app. */
+#login[hidden] { display:none; }
 #login .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
   padding:26px 28px; width:100%; max-width:400px; box-shadow:0 10px 40px rgba(0,0,0,.12); }
 #login h2 { margin:0 0 4px; font-size:17px; }
