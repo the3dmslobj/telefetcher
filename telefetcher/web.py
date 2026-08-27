@@ -8,6 +8,7 @@ between the two front ends.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import subprocess
 import sys
 import uuid
@@ -508,6 +509,23 @@ class Server:
 
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 OPEN_PATHS = ("/api/auth/",)  # reachable before sign-in
+
+
+def is_loopback(addr: str) -> bool:
+    """True only for addresses that can't be reached from another machine.
+
+    The Host/Origin guard below stops a web page from calling this API, but a
+    Host header is written by whoever sends the request, so it is not an access
+    check: bound to 0.0.0.0, anyone on the network can send `Host: localhost`
+    and drive the whole signed-in session. Refusing to bind off-loopback is the
+    part that actually holds.
+    """
+    if addr == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(addr).is_loopback
+    except ValueError:
+        return False
 
 
 def hostname_of(value: str, with_scheme: bool = False) -> str:

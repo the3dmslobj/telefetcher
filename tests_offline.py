@@ -118,6 +118,15 @@ with TemporaryDirectory() as tmp:
     check("aligns down to 1MiB", part.stat().st_size, ALIGN)
     check("offset divisible by 4096", offset % 4096, 0)
 
+print("\nui binds loopback only")
+from telefetcher.web import is_loopback
+# A Host header is supplied by the caller, so it can never be an access check.
+# Refusing to bind anywhere but loopback is what actually keeps the session in.
+for addr in ["127.0.0.1", "localhost", "::1", "127.5.5.5"]:
+    check(f"{addr} allowed", is_loopback(addr), True)
+for addr in ["0.0.0.0", "::", "192.168.1.169", "example.com", ""]:
+    check(f"{addr or '(empty)'} refused", is_loopback(addr), False)
+
 print(f"\n{ok} passed, {fail} failed")
 if __name__ == "__main__":
     raise SystemExit(1 if fail else 0)

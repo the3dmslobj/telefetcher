@@ -72,7 +72,11 @@ both share the ledger — grab something in the browser and `./tf get` knows you
 
 The interface holds a live Telegram session, so it is defended like one:
 
-- Binds to `127.0.0.1` only — verified with `lsof`; the LAN address refuses connections.
+- Binds to loopback only, and `--host` *enforces* it: a non-loopback address is refused
+  rather than bound. This is the protection that actually holds — a `Host` header is
+  written by whoever sends the request, so off-loopback anyone on the network could send
+  `Host: localhost` and drive the whole signed-in session. To reach it from another
+  machine, forward the port over ssh instead.
 - Rejects any request whose `Host` isn't a loopback name, which is what stops DNS
   rebinding (an attacker's domain pointed at 127.0.0.1 still sends its own name).
 - Rejects any cross-site `Origin`, so a page you have open elsewhere can't drive it.

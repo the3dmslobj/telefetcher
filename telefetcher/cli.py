@@ -62,7 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ui = sub.add_parser("ui", help="open the local web interface")
     ui.add_argument("--port", type=int, default=8420)
-    ui.add_argument("--host", default="127.0.0.1", help="bind address (loopback only)")
+    ui.add_argument("--host", default="127.0.0.1",
+                    help="bind address; loopback only, non-loopback is refused")
     ui.add_argument("--root", type=Path, help="downloads folder (default: ./downloads)")
     ui.add_argument("--no-open", action="store_true", help="don't launch a browser")
 
@@ -144,8 +145,16 @@ async def cmd_chats(client, args) -> int:
 
 
 async def cmd_ui(client, args) -> int:
-    from .web import serve
+    from .web import is_loopback, serve
 
+    if not is_loopback(args.host):
+        print(
+            f"refusing to bind {args.host!r}: the interface drives a signed-in "
+            "Telegram session with no password of its own, so it is loopback "
+            "only. Use 127.0.0.1, or tunnel in over ssh.",
+            file=sys.stderr,
+        )
+        return 2
     root = (args.root or Path.cwd() / "downloads").expanduser()
     await serve(client, root, args.host, args.port, not args.no_open, args.session)
     return 0
