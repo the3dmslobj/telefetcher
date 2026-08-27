@@ -272,7 +272,12 @@ class Server:
     # ---- routes --------------------------------------------------------
 
     async def index(self, _request):
-        return web.FileResponse(STATIC / "index.html")
+        # Without Cache-Control the browser caches the page heuristically and can
+        # serve a stale build for hours without revalidating. The ETag still
+        # makes the revalidation a cheap 304.
+        return web.FileResponse(
+            STATIC / "index.html", headers={"Cache-Control": "no-cache"}
+        )
 
     async def me(self, _request):
         user = await self.client.get_me()
