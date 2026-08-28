@@ -354,7 +354,9 @@ class Server:
                 "filename": i.filename,
                 "size": i.size,
                 "duration": i.duration,
-                "have": state.done(chat_id, i.msg_id) is not None,
+                # chat.id, not chat_id: the ledger is keyed by the bare channel
+                # id the downloader writes, not the marked -100… id from the browser.
+                "have": state.done(chat.id, i.msg_id) is not None,
             }
             for i in items
         ]
@@ -399,17 +401,26 @@ class Server:
 
             return CallbackReporter(item, on_progress)
 
-        def on_done(item):
+        def on_done(item, outcome):
             progress = job.files[item.msg_id]
-            if progress.status == "downloading":
+            if outcome == "skipped":
+                progress.status = "skipped"
+                progress.done = progress.size
+            elif outcome == "downloaded":
                 progress.status = "done"
                 progress.done = progress.size
+            else:
+                progress.status = "failed"
 
         async def worker():
             state = State(out_dir / ".telefetcher" / "state.db")
             try:
-                for item in items:  # mark what's already on disk before starting
-                    if not opts.overwrite and state.done(chat_id, item.msg_id):
+                # Mark what's already on disk before starting. The ledger is keyed
+                # by chat.id, the bare channel id — not the marked -100… id the
+                # browser sends — so querying it with chat_id never matched and
+                # every already-downloaded file sat at "queued" forever.
+                for item in items:
+                    if not opts.overwrite and state.done(chat.id, item.msg_id):
                         job.files[item.msg_id].status = "skipped"
                 summary = await run(
                     self.client, chat, items, opts, state,

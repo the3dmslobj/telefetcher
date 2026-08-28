@@ -42,6 +42,11 @@ def message(mid, name):
     return SimpleNamespace(id=mid, document=doc, message=name, date=NOW)
 
 
+def marked(cid):
+    """What Telethon reports as dialog.id for a channel — never the bare id."""
+    return -(1000000000000 + cid)
+
+
 CHANNELS = [
     channel(111, "Private Leaks", noforwards=True),
     channel(222, "Open Channel", username="openchan"),
@@ -73,7 +78,7 @@ class StubClient:
     def iter_dialogs(self):
         async def gen():
             for ch in CHANNELS:
-                yield SimpleNamespace(id=ch.id, name=ch.title, entity=ch)
+                yield SimpleNamespace(id=marked(ch.id), name=ch.title, entity=ch)
         return gen()
 
     def iter_messages(self, chat, **kw):
@@ -131,22 +136,22 @@ async def main():
             check("no third-party script tags", body.count("<script"), 1)
 
             print("\nscanning a chat")
-            scan = await (await http.post("/api/scan", json={"chat_id": 111})).json()
+            scan = await (await http.post("/api/scan", json={"chat_id": marked(111)})).json()
             check("title returned", scan["title"], "Private Leaks")
             check("videos found", len(scan["items"]), 3)
             check("newest first", [i["msg_id"] for i in scan["items"]], [9, 8, 7])
             check("names built", scan["items"][0]["filename"], "000009_alpha.mp4")
             check("nothing owned yet", [i["have"] for i in scan["items"]], [False] * 3)
 
-            empty = await (await http.post("/api/scan", json={"chat_id": 333})).json()
+            empty = await (await http.post("/api/scan", json={"chat_id": marked(333)})).json()
             check("empty chat handled", empty["items"], [])
 
             print("\ndownloading")
-            bad = await http.post("/api/download", json={"chat_id": 111, "msg_ids": []})
+            bad = await http.post("/api/download", json={"chat_id": marked(111), "msg_ids": []})
             check("empty selection rejected", bad.status, 400)
 
             job = await (await http.post(
-                "/api/download", json={"chat_id": 111, "msg_ids": [9, 8], "workers": 2})).json()
+                "/api/download", json={"chat_id": marked(111), "msg_ids": [9, 8], "workers": 2})).json()
             check("job created", bool(job["job_id"]), True)
 
             for _ in range(100):
@@ -169,9 +174,28 @@ async def main():
             check("no .part leftovers", list(out.glob("*.part")), [])
 
             print("\nrescan reflects what we now own")
-            scan2 = await (await http.post("/api/scan", json={"chat_id": 111})).json()
+            scan2 = await (await http.post("/api/scan", json={"chat_id": marked(111)})).json()
             check("owned files marked", {i["msg_id"]: i["have"] for i in scan2["items"]},
                   {9: True, 8: True, 7: False})
+
+            print("\nre-downloading what we already have")
+            again = await (await http.post(
+                "/api/download",
+                json={"chat_id": marked(111), "msg_ids": [9, 8], "workers": 2})).json()
+            check("second job created", bool(again["job_id"]), True)
+            for _ in range(100):
+                jobs = await (await http.get("/api/jobs")).json()
+                j2 = next(x for x in jobs if x["id"] == again["job_id"])
+                if j2["status"] != "running":
+                    break
+                await asyncio.sleep(0.05)
+            check("second job finished", j2["status"], "done")
+            # Nothing to fetch, but the job must still account for every file:
+            # left "queued" the interface shows a finished job with a dead row.
+            check("skips reported", sorted(f["status"] for f in j2["files"]),
+                  ["skipped", "skipped"])
+            check("all accounted for", j2["finished"], 2)
+            check("nothing re-fetched", stub.downloads, 2)
 
             print("\nfile management")
             files = await (await http.get("/api/files")).json()

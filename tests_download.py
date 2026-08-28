@@ -209,7 +209,7 @@ async def main():
         c = StubClient()
         summary = await run(c, Chat(), items, new_opts(out, workers=2), st,
                             make_reporter=make_reporter, quiet=True,
-                            on_done=lambda it: finished.append(it.msg_id))
+                            on_done=lambda it, outcome: finished.append(it.msg_id))
         check("quiet run still downloads", summary.downloaded, 3)
         check("progress reported", len(seen) > 0, True)
         check("progress covers every file", {m for m, _, _ in seen}, {40, 41, 42})

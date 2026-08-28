@@ -257,6 +257,7 @@ async def run(
 
     async def worker(item: VideoItem) -> None:
         slot = await slots.get()
+        outcome = "failed"  # stands if download_one raises before returning
         try:
             outcome, written = await download_one(
                 client, chat_id, item, opts, state, slot, make_reporter
@@ -269,13 +270,16 @@ async def run(
             else:
                 summary.failed += 1
         except Exception as exc:  # keep going; report at the end
+            outcome = "failed"
             summary.failed += 1
             summary.errors.append(f"msg {item.msg_id} ({item.filename}): {exc!r}")
         finally:
             slots.put_nowait(slot)
             overall.update(1)
             if on_done:
-                on_done(item)
+                # The outcome goes with it: a file skipped here never reaches a
+                # reporter, so this is a caller's only chance to hear about it.
+                on_done(item, outcome)
 
     pending: set[asyncio.Task] = set()
     for item in items:
